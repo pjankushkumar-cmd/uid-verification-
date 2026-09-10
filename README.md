@@ -1,8 +1,10 @@
-UID Verification Bot — API-aware login build
+UID Verification Bot — Login Final Build
 
-This version keeps the site UI as the source of truth but waits for the site's
-native Login form submission and observes the POST /api/webapi/Login response.
-It does not hard-code credentials, session tokens, or authorization headers.
+Purpose:
+- Log into the user's YaarWin account through the website's normal login flow.
+- Observe the site's own POST /api/webapi/Login response.
+- Verify success only when the API reports success AND the protected record page is accessible.
+- Keep the browser session for later read-only UID record lookup.
 
 Render:
 - Background Worker
@@ -10,14 +12,22 @@ Render:
 - Dockerfile: ./Dockerfile
 - Docker context: .
 - No build/start command
-- BOT_TOKEN, ADMIN_CHAT_ID, HEADLESS=true, POLL_SECONDS=2
+- Environment:
+  BOT_TOKEN
+  ADMIN_CHAT_ID
+  HEADLESS=true
+  POLL_SECONDS=2
 
 Telegram:
- /setlogin NUMBER PASSWORD
- /login
- /info UID
- /screenshot
- /status
- /stop
+  /setlogin NUMBER PASSWORD
+  /login
+  /screenshot
+  /status
+  /info UID
+  /stop
 
-Read-only: no betting/staking actions.
+Important:
+- No betting, staking, withdrawal, or wager actions.
+- The bot does not hard-code passwords, cookies, authorization tokens, or session tokens.
+- If the website itself returns an error such as "No operation permission",
+  the bot reports that response instead of trying to bypass the site's controls.
