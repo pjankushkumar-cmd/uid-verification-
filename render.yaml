@@ -1,6 +1,6 @@
 services:
   - type: worker
-    name: yaarwin-info-bot
+    name: uid-verification
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .

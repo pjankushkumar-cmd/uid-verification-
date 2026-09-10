@@ -1,10 +1,4 @@
-import asyncio
-import json
-import logging
-import os
-import re
-from pathlib import Path
-
+import asyncio, json, logging, os, re
 import aiohttp
 from playwright.async_api import async_playwright
 
@@ -13,576 +7,268 @@ RECORD_URL = "https://yaarwin.app/#/main/InvitationBonus/Record"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
-DEMO_PHONE = os.getenv("DEMO_PHONE", "")
-DEMO_PASSWORD = os.getenv("DEMO_PASSWORD", "")
-
 HEADLESS = os.getenv("HEADLESS", "true").lower() != "false"
 POLL_SECONDS = float(os.getenv("POLL_SECONDS", "2"))
 
-phone_value = DEMO_PHONE
-password_value = DEMO_PASSWORD
-
-pw = None
-browser = None
-context = None
-page = None
-poll_task = None
+phone_value = ""
+password_value = ""
+pw = browser = context = page = None
 logged_in = False
 
-log = logging.getLogger("yaarwin-info-bot")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+log = logging.getLogger("uid-bot")
 
+def norm(s): return re.sub(r"\s+", " ", s or "").strip()
 
 def is_admin(chat_id):
-    try:
-        return int(chat_id) == int(ADMIN_CHAT_ID)
-    except Exception:
-        return False
-
+    try: return int(chat_id) == int(ADMIN_CHAT_ID)
+    except: return False
 
 async def tg(method, data=None):
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is missing")
-
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
-    timeout = aiohttp.ClientTimeout(total=45)
-
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(url, data=data or {}) as response:
-            body = await response.text()
-            if response.status >= 400:
-                raise RuntimeError(f"Telegram API {response.status}: {body}")
+    timeout = aiohttp.ClientTimeout(total=60)
+    async with aiohttp.ClientSession(timeout=timeout) as s:
+        async with s.post(url, data=data or {}) as r:
+            body = await r.text()
+            if r.status >= 400: raise RuntimeError(f"Telegram API {r.status}: {body}")
             return json.loads(body)
 
-
 async def send(chat_id, text):
-    await tg("sendMessage", {
-        "chat_id": str(chat_id),
-        "text": text
-    })
+    await tg("sendMessage", {"chat_id": str(chat_id), "text": text})
 
-
-async def shutdown_browser():
+async def close_browser():
     global pw, browser, context, page, logged_in
-
-    try:
-        if context:
-            await context.close()
-    except Exception:
-        pass
-
-    try:
-        if browser:
-            await browser.close()
-    except Exception:
-        pass
-
-    try:
-        if pw:
-            await pw.stop()
-    except Exception:
-        pass
-
+    for obj, method in [(context, "close"), (browser, "close"), (pw, "stop")]:
+        try:
+            if obj: await getattr(obj, method)()
+        except: pass
     pw = browser = context = page = None
     logged_in = False
 
-
-async def first_visible(selectors):
-    for selector in selectors:
+async def visible(selectors):
+    for sel in selectors:
         try:
-            loc = page.locator(selector).first
-            if await loc.count() and await loc.is_visible():
-                return loc
-        except Exception:
-            pass
+            loc = page.locator(sel)
+            for i in range(min(await loc.count(), 10)):
+                x = loc.nth(i)
+                if await x.is_visible(): return x
+        except: pass
     return None
 
+async def body():
+    try: return await page.locator("body").inner_text(timeout=15000)
+    except: return ""
 
-async def body_text():
+async def login_form():
+    p = await visible(['input[type="tel"]','input[placeholder*="phone" i]',
+                       'input[placeholder*="mobile" i]','input[placeholder*="number" i]',
+                       'input[name*="phone" i]','input[name*="mobile" i]',
+                       'input[name*="username" i]'])
+    pwf = await visible(['input[type="password"]','input[placeholder*="password" i]',
+                         'input[name*="password" i]'])
+    return bool(p and pwf)
+
+async def screenshot(path="/tmp/debug.png"):
     try:
-        return await page.locator("body").inner_text(timeout=10000)
-    except Exception:
-        return ""
+        await page.screenshot(path=path, full_page=True)
+        return path
+    except: return None
 
-
-def clean_text(text):
-    return re.sub(r"\s+", " ", text or "").strip().lower()
-
-
-async def has_login_form():
-    """True when the page still visibly looks like the login screen."""
-    phone = await first_visible([
-        'input[type="tel"]',
-        'input[placeholder*="phone" i]',
-        'input[placeholder*="mobile" i]',
-        'input[placeholder*="number" i]',
-        'input[name*="phone" i]',
-        'input[name*="mobile" i]',
-        'input[name*="username" i]',
-    ])
-    password = await first_visible([
-        'input[type="password"]',
-        'input[placeholder*="password" i]',
-        'input[name*="password" i]',
-    ])
-    return bool(phone and password)
-
-
-async def has_logout_marker():
-    """Look for a normal authenticated/account UI marker."""
-    selectors = [
-        'text=/^logout$/i',
-        'text=/^log out$/i',
-        'text=/^sign out$/i',
-        'text=/logout/i',
-        'text=/log out/i',
-        'text=/sign out/i',
-        'button:has-text("Logout")',
-        'button:has-text("Log out")',
-        'button:has-text("Sign out")',
+async def click_login():
+    candidates = [
+        page.get_by_role("button", name=re.compile(r"^\s*log\s*in\s*$", re.I)),
+        page.get_by_text("Log in", exact=True),
+        page.locator('button:has-text("Log in")'),
+        page.locator('[role="button"]:has-text("Log in")'),
+        page.locator('button[type="submit"]'),
+        page.locator('input[type="submit"]'),
+        page.locator('a:has-text("Log in")')
     ]
-
-    for selector in selectors:
+    btn = None
+    for loc in candidates:
         try:
-            loc = page.locator(selector).first
-            if await loc.count() and await loc.is_visible():
-                return True
-        except Exception:
-            pass
+            for i in range(min(await loc.count(), 20)):
+                x = loc.nth(i)
+                if await x.is_visible():
+                    btn = x; break
+            if btn: break
+        except: pass
+    if not btn:
+        await screenshot("/tmp/login_button_not_found.png")
+        raise RuntimeError("Visible 'Log in' button was not detected.")
 
-    text = clean_text(await body_text())
-    return bool(re.search(r"\b(logout|log out|sign out)\b", text))
+    try: await btn.scroll_into_view_if_needed()
+    except: pass
+    await page.wait_for_timeout(500)
 
+    # Prefer a real click; then force/mouse/DOM fallbacks.
+    for mode in ("normal", "force"):
+        try:
+            await btn.click(timeout=15000, force=(mode=="force"))
+            log.info("Login click: %s", mode)
+            return
+        except Exception as e:
+            log.info("Login %s click failed: %s", mode, e)
 
-async def verify_authenticated_session():
-    """Verify the site accepted the credentials instead of trusting the click."""
+    try:
+        box = await btn.bounding_box()
+        if box:
+            x, y = box["x"]+box["width"]/2, box["y"]+box["height"]/2
+            await page.mouse.move(x, y, steps=5)
+            await page.mouse.down(); await page.wait_for_timeout(100); await page.mouse.up()
+            log.info("Login click: mouse")
+            return
+    except Exception as e: log.info("Mouse click failed: %s", e)
+
+    try:
+        await btn.evaluate("""el => {
+            const r=el.getBoundingClientRect(), o={bubbles:true,cancelable:true,composed:true,
+            view:window,clientX:r.left+r.width/2,clientY:r.top+r.height/2};
+            try { el.dispatchEvent(new PointerEvent("pointerdown",o)); } catch(e){}
+            el.dispatchEvent(new MouseEvent("mousedown",o));
+            try { el.dispatchEvent(new PointerEvent("pointerup",o)); } catch(e){}
+            el.dispatchEvent(new MouseEvent("mouseup",o));
+            el.dispatchEvent(new MouseEvent("click",o));
+            if (typeof el.click==="function") el.click();
+        }""")
+        log.info("Login click: DOM")
+    except Exception as e:
+        await screenshot("/tmp/login_click_failed.png")
+        raise RuntimeError(f"Could not activate Log in control: {e}")
+
+async def verify():
     global logged_in
-
-    # Give the SPA time to finish its API request/router transition.
-    await page.wait_for_timeout(2500)
-
-    current_url = page.url
-    login_form = await has_login_form()
-    logout_marker = await has_logout_marker()
-
-    # If we are still on the login route and the login form remains, it failed.
-    if login_form and "#/login" in current_url.lower():
-        return False, "The site is still showing the login form. Credentials may be wrong or login was rejected."
-
-    # Test an authenticated-only route. This is stronger than checking a button click.
-    try:
-        await page.goto(
-            RECORD_URL,
-            wait_until="domcontentloaded",
-            timeout=60000
-        )
-        await page.wait_for_timeout(2500)
-    except Exception as exc:
-        return False, f"Could not open the protected record page: {type(exc).__name__}: {exc}"
-
-    protected_url = page.url
-    protected_has_login = await has_login_form()
-    protected_text = clean_text(await body_text())
-    protected_logout = await has_logout_marker()
-
-    # A redirect back to #/login or a visible login form means the session did not authenticate.
-    if "#/login" in protected_url.lower() or protected_has_login:
-        return False, "The site redirected back to the login screen, so the account session was not authenticated."
-
-    # If the protected page loads and shows account/logout markers, this is a strong success signal.
-    # If there is no logout text, the protected route itself is still our primary verification.
+    await page.wait_for_timeout(5000)
+    if await login_form():
+        return False, "The site is still showing the login form."
+    await page.goto(RECORD_URL, wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(3500)
+    if "#/login" in page.url.lower() or await login_form():
+        logged_in = False
+        return False, "Protected page redirected back to login."
+    text = (await body()).lower()
+    for marker in ("please login","please log in","unauthorized","not authorized","session expired","login required"):
+        if marker in text:
+            logged_in = False
+            return False, f"Protected page says: {marker}"
     logged_in = True
+    return True, "Authenticated session verified by the protected record page."
 
-    if protected_logout or logout_marker:
-        return True, "Authenticated session verified; account UI/logout marker is visible."
-
-    # Reject obvious access-denied/login text even if the URL did not redirect.
-    if any(x in protected_text for x in [
-        "please login",
-        "please log in",
-        "unauthorized",
-        "not authorized",
-        "session expired",
-    ]):
-        logged_in = False
-        return False, "The protected page reports that authentication is required or the session expired."
-
-    return True, "Authenticated session verified by successfully opening the protected record page."
-
-
-async def ensure_login():
-    global pw, browser, context, page, logged_in
-
+async def do_login():
+    global pw, browser, context, page
     if not phone_value or not password_value:
-        raise RuntimeError(
-            "Login details missing. Use /setlogin NUMBER PASSWORD first."
-        )
-
-    await shutdown_browser()
-
+        raise RuntimeError("Login details missing. Use /setlogin NUMBER PASSWORD first.")
+    await close_browser()
     pw = await async_playwright().start()
-    browser = await pw.chromium.launch(
-        headless=HEADLESS,
-        args=[
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu"
-        ]
-    )
-
-    context = await browser.new_context(
-        viewport={"width": 390, "height": 844},
-        device_scale_factor=2,
-        is_mobile=True,
-        has_touch=True
-    )
-
+    browser = await pw.chromium.launch(headless=HEADLESS, args=[
+        "--no-sandbox","--disable-dev-shm-usage","--disable-gpu","--disable-setuid-sandbox"])
+    context = await browser.new_context(viewport={"width":390,"height":844},
+        device_scale_factor=2,is_mobile=True,has_touch=True,
+        user_agent="Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36")
     page = await context.new_page()
+    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(3500)
 
-    await page.goto(
-        LOGIN_URL,
-        wait_until="domcontentloaded",
-        timeout=60000
-    )
-    await page.wait_for_timeout(2500)
-
-    phone = await first_visible([
-        'input[type="tel"]',
-        'input[placeholder*="phone" i]',
-        'input[placeholder*="mobile" i]',
-        'input[placeholder*="number" i]',
-        'input[name*="phone" i]',
-        'input[name*="mobile" i]',
-        'input[name*="username" i]',
-    ])
-
-    password = await first_visible([
-        'input[type="password"]',
-        'input[placeholder*="password" i]',
-        'input[name*="password" i]',
-    ])
-
-    if not phone or not password:
-        await page.screenshot(path="login_debug.png", full_page=True)
-        raise RuntimeError("Login fields not detected. login_debug.png saved.")
-
+    phone = await visible(['input[type="tel"]','input[placeholder*="phone" i]',
+        'input[placeholder*="mobile" i]','input[placeholder*="number" i]',
+        'input[name*="phone" i]','input[name*="mobile" i]','input[name*="username" i]'])
+    pwd = await visible(['input[type="password"]','input[placeholder*="password" i]',
+        'input[name*="password" i]'])
+    if not phone: raise RuntimeError("Phone number field was not detected.")
+    if not pwd: raise RuntimeError("Password field was not detected.")
     await phone.fill(phone_value)
-    await password.fill(password_value)
+    await pwd.fill(password_value)
+    await page.wait_for_timeout(700)
+    await click_login()
+    await page.wait_for_timeout(7500)
 
-    # The YaarWin mobile UI uses a visible green "Log in" control.
-    # Do not rely only on type=submit/role=button: some SPA builds render
-    # the control as a div/button wrapper. Try several real DOM click paths.
-    login_button = None
-    selectors = [
-        'button:has-text("Log in")',
-        '[role="button"]:has-text("Log in")',
-        'button:has-text("Login")',
-        '[role="button"]:has-text("Login")',
-        'button[type="submit"]',
-        'input[type="submit"]',
-    ]
-
-    for selector in selectors:
-        try:
-            loc = page.locator(selector).filter(has_text=re.compile(r"^\s*log\s*in\s*$", re.I)).first
-            if await loc.count() and await loc.is_visible():
-                login_button = loc
-                break
-        except Exception:
-            pass
-
-    # Fallback: exact visible text, useful when the SPA does not expose a
-    # semantic button role. Walk up to the nearest clickable element.
-    if not login_button:
-        try:
-            txt = page.get_by_text("Log in", exact=True).first
-            if await txt.count() and await txt.is_visible():
-                candidate = txt.locator("xpath=ancestor-or-self::*[self::button or @role='button' or @onclick][1]")
-                if await candidate.count() and await candidate.is_visible():
-                    login_button = candidate
-                else:
-                    login_button = txt
-        except Exception:
-            pass
-
-    if not login_button:
-        await page.screenshot(path="login_button_debug.png", full_page=True)
-        raise RuntimeError("Visible 'Log in' control not detected. login_button_debug.png saved.")
-
-    # Scroll into view, then perform a real click. If an overlay intercepts it,
-    # retry with force and finally with the DOM click method.
-    await login_button.scroll_into_view_if_needed()
-    try:
-        await login_button.click(timeout=10000)
-    except Exception:
-        try:
-            await login_button.click(force=True, timeout=10000)
-        except Exception:
-            await login_button.evaluate("el => el.click()")
-
-    # Give the site's login API/router enough time to complete before checking
-    # the authenticated session.
-    await page.wait_for_timeout(1500)
-
-    ok, reason = await verify_authenticated_session()
+    ok, reason = await verify()
     if not ok:
-        try:
-            await page.screenshot(path="login_failed_debug.png", full_page=True)
-        except Exception:
-            pass
-        logged_in = False
-        raise RuntimeError(f"Login was NOT verified. {reason}")
-
-    log.info("%s", reason)
+        await screenshot("/tmp/login_failed_debug.png")
+        raise RuntimeError("Login was NOT verified. " + reason)
     return reason
 
-
-async def open_records():
-    global logged_in
-
-    if not page or not logged_in:
-        await ensure_login()
-        return
-
-    await page.goto(
-        RECORD_URL,
-        wait_until="domcontentloaded",
-        timeout=60000
-    )
-    await page.wait_for_timeout(2000)
-
-    # Re-check that the protected route did not throw us back to login.
-    if "#/login" in page.url.lower() or await has_login_form():
-        logged_in = False
-        raise RuntimeError("The saved login session expired or the site redirected to login. Use /login again.")
-
-
-async def read_record_text():
-    return await page.locator("body").inner_text(timeout=15000)
-
-
-def normalize(s):
-    return re.sub(r"\s+", " ", s or "").strip()
-
-
-def find_uid_rows(text, uid):
-    lines = [normalize(x) for x in text.splitlines() if normalize(x)]
-    target = str(uid).strip()
-
-    matches = []
-    for i, line in enumerate(lines):
-        if target in line:
-            left = max(0, i - 1)
-            right = min(len(lines), i + 3)
-            matches.append(" | ".join(lines[left:right]))
-
-    return matches
-
-
 async def query_uid(uid):
-    await open_records()
+    global logged_in
+    if not logged_in: await do_login()
+    await page.goto(RECORD_URL, wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(3000)
+    if "#/login" in page.url.lower() or await login_form():
+        logged_in = False
+        raise RuntimeError("Saved login session expired. Use /login again.")
+    text = await body()
+    lines = [norm(x) for x in text.splitlines() if norm(x)]
+    out = []
+    for i, line in enumerate(lines):
+        if str(uid).strip() in line:
+            out.append(" | ".join(lines[max(0,i-1):min(len(lines),i+4)]))
+    return out
 
-    text = await read_record_text()
-    matches = find_uid_rows(text, uid)
+async def handle(chat_id, text):
+    global phone_value, password_value
+    if not is_admin(chat_id): return
+    p = text.strip().split()
+    if not p: return
+    cmd = p[0].split("@")[0].lower()
 
-    if not matches:
-        compact = normalize(text)
-        if str(uid) in compact:
-            pos = compact.find(str(uid))
-            matches = [compact[max(0, pos - 180):pos + 420]]
-
-    return matches, text
-
-
-def format_info(uid, matches):
-    if not matches:
-        return (
-            f"UID: {uid}\n"
-            f"Status: Record not found on the current page."
-        )
-
-    out = [f"UID: {uid}", "", "Record:"]
-
-    for n, match in enumerate(matches[:5], 1):
-        out.append(f"{n}. {match}")
-
-    out.append("")
-    out.append(
-        "Note: This is read-only information taken from the visible record page."
-    )
-    return "\n".join(out)
-
-
-async def handle_command(chat_id, text):
-    global phone_value, password_value, poll_task
-
-    if not is_admin(chat_id):
-        return
-
-    parts = text.strip().split()
-    if not parts:
-        return
-
-    command = parts[0].split("@")[0].lower()
-
-    if command == "/start":
-        await send(
-            chat_id,
-            "YaarWin UID Verification Bot\n\n"
-            "/setlogin NUMBER PASSWORD\n"
-            "/login - verify real login\n"
-            "/info UID - read record\n"
-            "/screenshot\n"
-            "/status\n"
-            "/stop"
-        )
-
-    elif command == "/setlogin":
-        if len(parts) != 3:
-            await send(chat_id, "Use:\n/setlogin NUMBER PASSWORD")
-            return
-
-        phone_value = parts[1]
-        password_value = parts[2]
-
-        # Force the next operation to establish a fresh authenticated session.
-        await shutdown_browser()
-
-        await send(
-            chat_id,
-            "Login details saved in memory.\nNow use /login to verify the website session."
-        )
-
-    elif command == "/login":
+    if cmd == "/start":
+        await send(chat_id, "/setlogin NUMBER PASSWORD\n/login\n/info UID\n/screenshot\n/status\n/stop")
+    elif cmd == "/setlogin":
+        if len(p) != 3:
+            await send(chat_id, "Use:\n/setlogin NUMBER PASSWORD"); return
+        phone_value, password_value = p[1], p[2]
+        await close_browser()
+        await send(chat_id, "Login details saved in memory.\nNow use /login.")
+    elif cmd == "/login":
+        try: await send(chat_id, "Checking website login..."); reason=await do_login()
+        except Exception as e: await send(chat_id, f"Login NOT verified.\n\n{type(e).__name__}: {e}\n\nUse /screenshot to inspect the page.")
+        else: await send(chat_id, "Login verified successfully.\n\n"+reason)
+    elif cmd == "/info":
+        if len(p)!=2: await send(chat_id, "Use:\n/info 123452"); return
         try:
-            reason = await ensure_login()
-            await send(chat_id, f"Login verified successfully.\n\n{reason}")
-        except Exception as exc:
-            await send(
-                chat_id,
-                f"Login NOT verified.\n\n{type(exc).__name__}: {exc}\n\n"
-                "A debug screenshot was saved on the bot server if the browser reached the page."
-            )
-
-    elif command == "/info":
-        if len(parts) != 2:
-            await send(chat_id, "Use:\n/info 123452")
-            return
-
-        uid = parts[1]
-
-        try:
-            matches, _ = await query_uid(uid)
-            await send(chat_id, format_info(uid, matches))
-        except Exception as exc:
-            await send(
-                chat_id,
-                f"Info error:\n{type(exc).__name__}: {exc}"
-            )
-
-    elif command == "/screenshot":
-        if not page:
-            await send(chat_id, "Browser is not open. Use /login first.")
-            return
-
-        path = "record_mobile.png"
-
+            rows=await query_uid(p[1])
+            if rows:
+                await send(chat_id, f"UID: {p[1]}\n\nRecord:\n" + "\n".join(f"{i+1}. {x}" for i,x in enumerate(rows[:5])))
+            else: await send(chat_id, f"UID: {p[1]}\nStatus: Record not found on the current page.")
+        except Exception as e: await send(chat_id, f"Info error:\n{type(e).__name__}: {e}")
+    elif cmd == "/screenshot":
+        if not page: await send(chat_id, "Browser is not open. Use /login first."); return
+        path="/tmp/current_screen.png"
         try:
             await page.screenshot(path=path, full_page=False)
-
-            with open(path, "rb") as photo:
-                form = aiohttp.FormData()
-                form.add_field("chat_id", str(chat_id))
-                form.add_field(
-                    "photo",
-                    photo,
-                    filename="record_mobile.png",
-                    content_type="image/png"
-                )
-                await tg("sendPhoto", form)
-        except Exception as exc:
-            await send(
-                chat_id,
-                f"Screenshot error:\n{type(exc).__name__}: {exc}"
-            )
-
-    elif command == "/status":
-        await send(
-            chat_id,
-            "Status\n\n"
-            f"Browser open: {bool(page)}\n"
-            f"Login details configured: {bool(phone_value and password_value)}\n"
-            f"Login verified: {logged_in}\n"
-            f"Current page: {page.url if page else '-'}"
-        )
-
-    elif command == "/stop":
-        if poll_task and not poll_task.done():
-            poll_task.cancel()
-        poll_task = None
-        await shutdown_browser()
-        await send(chat_id, "Bot browser stopped.")
-
-
-async def telegram_poll():
-    offset = None
-
-    # Clear any old queued updates before starting. This does not solve a second
-    # running bot instance; only one getUpdates consumer can use a token at once.
-    try:
-        old = await tg("getUpdates", {
-            "offset": -1,
-            "timeout": 0,
-            "allowed_updates": json.dumps(["message"])
-        })
-        if old.get("result"):
-            offset = old["result"][-1]["update_id"] + 1
-    except Exception:
-        pass
-
-    while True:
-        try:
-            params = {
-                "timeout": 25,
-                "allowed_updates": json.dumps(["message"])
-            }
-
-            if offset is not None:
-                params["offset"] = offset
-
-            result = await tg("getUpdates", params)
-
-            for item in result.get("result", []):
-                offset = item["update_id"] + 1
-
-                message = item.get("message") or {}
-                chat = message.get("chat") or {}
-                chat_id = chat.get("id")
-                text = message.get("text", "")
-
-                if chat_id and text:
-                    await handle_command(chat_id, text)
-
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log.error("Telegram polling error: %s", exc)
-            await asyncio.sleep(max(3, POLL_SECONDS))
-
+            with open(path,"rb") as f:
+                form=aiohttp.FormData(); form.add_field("chat_id",str(chat_id))
+                form.add_field("photo",f,filename="screen.png",content_type="image/png")
+                await tg("sendPhoto",form)
+        except Exception as e: await send(chat_id, f"Screenshot error:\n{e}")
+    elif cmd == "/status":
+        await send(chat_id, f"Browser open: {bool(page)}\nLogin configured: {bool(phone_value and password_value)}\nLogin verified: {logged_in}\nCurrent page: {page.url if page else '-'}")
+    elif cmd == "/stop":
+        await close_browser()
+        await send(chat_id, "Browser stopped.")
 
 async def main():
-    if not BOT_TOKEN:
-        raise SystemExit("BOT_TOKEN is missing.")
+    if not BOT_TOKEN: raise SystemExit("BOT_TOKEN is missing.")
+    if not ADMIN_CHAT_ID: raise SystemExit("ADMIN_CHAT_ID is missing.")
+    offset=None
+    try:
+        r=await tg("getUpdates",{"offset":-1,"timeout":0,"allowed_updates":json.dumps(["message"])})
+        if r.get("result"): offset=r["result"][-1]["update_id"]+1
+    except: pass
+    log.info("UID Verification Bot started")
+    while True:
+        try:
+            params={"timeout":25,"allowed_updates":json.dumps(["message"])}
+            if offset is not None: params["offset"]=offset
+            r=await tg("getUpdates",params)
+            for u in r.get("result",[]):
+                offset=u["update_id"]+1
+                m=u.get("message",{}); c=m.get("chat",{}).get("id"); t=m.get("text","")
+                if c and t: await handle(c,t)
+        except asyncio.CancelledError: raise
+        except Exception as e:
+            log.error("Polling error: %s",e)
+            await asyncio.sleep(max(3,POLL_SECONDS))
 
-    if not ADMIN_CHAT_ID:
-        raise SystemExit("ADMIN_CHAT_ID is missing.")
-
-    log.info("YaarWin UID Verification Bot started")
-    await telegram_poll()
-
-
-if __name__ == "__main__":
+if __name__=="__main__":
     asyncio.run(main())
