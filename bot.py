@@ -272,27 +272,60 @@ async def ensure_login():
     await phone.fill(phone_value)
     await password.fill(password_value)
 
-    login_button = await first_visible([
+    # The YaarWin mobile UI uses a visible green "Log in" control.
+    # Do not rely only on type=submit/role=button: some SPA builds render
+    # the control as a div/button wrapper. Try several real DOM click paths.
+    login_button = None
+    selectors = [
+        'button:has-text("Log in")',
+        '[role="button"]:has-text("Log in")',
+        'button:has-text("Login")',
+        '[role="button"]:has-text("Login")',
         'button[type="submit"]',
         'input[type="submit"]',
-    ])
+    ]
 
-    if not login_button:
+    for selector in selectors:
         try:
-            loc = page.get_by_role(
-                "button",
-                name=re.compile(r"login|log in|sign in", re.I)
-            ).first
+            loc = page.locator(selector).filter(has_text=re.compile(r"^\s*log\s*in\s*$", re.I)).first
             if await loc.count() and await loc.is_visible():
                 login_button = loc
+                break
+        except Exception:
+            pass
+
+    # Fallback: exact visible text, useful when the SPA does not expose a
+    # semantic button role. Walk up to the nearest clickable element.
+    if not login_button:
+        try:
+            txt = page.get_by_text("Log in", exact=True).first
+            if await txt.count() and await txt.is_visible():
+                candidate = txt.locator("xpath=ancestor-or-self::*[self::button or @role='button' or @onclick][1]")
+                if await candidate.count() and await candidate.is_visible():
+                    login_button = candidate
+                else:
+                    login_button = txt
         except Exception:
             pass
 
     if not login_button:
         await page.screenshot(path="login_button_debug.png", full_page=True)
-        raise RuntimeError("Login button not detected. login_button_debug.png saved.")
+        raise RuntimeError("Visible 'Log in' control not detected. login_button_debug.png saved.")
 
-    await login_button.click()
+    # Scroll into view, then perform a real click. If an overlay intercepts it,
+    # retry with force and finally with the DOM click method.
+    await login_button.scroll_into_view_if_needed()
+    try:
+        await login_button.click(timeout=10000)
+    except Exception:
+        try:
+            await login_button.click(force=True, timeout=10000)
+        except Exception:
+            await login_button.evaluate("el => el.click()")
+
+    # Give the site's login API/router enough time to complete before checking
+    # the authenticated session.
+    await page.wait_for_timeout(1500)
 
     ok, reason = await verify_authenticated_session()
     if not ok:
