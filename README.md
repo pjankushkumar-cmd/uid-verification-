@@ -1,40 +1,52 @@
-# YaarWin Telegram Info Bot
+# YaarWin UID Verification Bot
 
-## What it does
+Read-only Telegram bot for logging into the supplied website account and reading visible Invitation Bonus records.
 
-1. Login to the supplied demo account.
-2. Open the Invitation Bonus Record page.
-3. Accept a Telegram command such as:
-   /info 123452
-4. Find the UID on the currently visible record page and return the
-   surrounding visible record text (including time/amount when those
-   fields are visible).
-5. /screenshot sends the current mobile-layout page screenshot.
+## Important login change
 
-## Telegram commands
+The bot no longer treats a login-button click as a successful login. After clicking Login it:
 
-/start
-/setlogin NUMBER PASSWORD
-/login
-/info UID
-/screenshot
-/status
-/stop
+1. waits for the SPA transition;
+2. checks that the login form is gone;
+3. opens the protected Invitation Bonus Record route;
+4. verifies the site did not redirect back to `#/login`;
+5. checks for obvious authentication/session errors;
+6. uses the authenticated record page as the final verification signal.
+
+If verification fails, Telegram receives **Login NOT verified** instead of a false success message. A debug screenshot is also saved in the container when possible.
 
 ## Render
 
-Use Docker runtime. Build Command and Start Command should be left blank
-because Dockerfile handles installation and startup.
+Create a **Background Worker** using Docker.
+
+- Dockerfile: `./Dockerfile`
+- Docker context: `.`
+- Build command: leave blank
+- Start command: leave blank (Dockerfile CMD starts the bot)
 
 Environment variables:
-BOT_TOKEN
-ADMIN_CHAT_ID
-DEMO_PHONE (optional)
-DEMO_PASSWORD (optional)
 
-The site can change its DOM/table structure. If /info cannot find the
-UID even though it is visibly present, update the row/selector logic
-against the current page HTML.
+- `BOT_TOKEN` = Telegram bot token
+- `ADMIN_CHAT_ID` = your Telegram chat ID
+- `HEADLESS` = `true`
+- `POLL_SECONDS` = `2`
 
-This project only reads and reports records. It does not place bets,
-change balances, or modify transactions.
+## Telegram commands
+
+`/start`
+
+`/setlogin NUMBER PASSWORD`
+
+`/login` - performs real login verification
+
+`/info UID` - reads matching visible record text
+
+`/screenshot` - sends current browser screenshot
+
+`/status`
+
+`/stop`
+
+Credentials are kept only in process memory by this version. Avoid posting sensitive credentials anywhere except the bot chat you control.
+
+This bot is read-only: it does not place bets, submit transactions, or modify records.

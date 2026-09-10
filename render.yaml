@@ -9,10 +9,6 @@ services:
         sync: false
       - key: ADMIN_CHAT_ID
         sync: false
-      - key: DEMO_PHONE
-        sync: false
-      - key: DEMO_PASSWORD
-        sync: false
       - key: HEADLESS
         value: "true"
       - key: POLL_SECONDS
