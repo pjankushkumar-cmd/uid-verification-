@@ -14,6 +14,7 @@ phone_value = ""
 password_value = ""
 pw = browser = context = page = None
 logged_in = False
+LOGIN_API_DIAG = "not observed"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("uid-bot")
@@ -217,8 +218,45 @@ async def do_login():
     await phone.fill(phone_value)
     await pwd.fill(password_value)
     await page.wait_for_timeout(700)
-    await click_login()
-    await page.wait_for_timeout(7500)
+
+    # YaarWin submits the login through its web API.  Prefer the
+    # form's native submit/keyboard path because SPA click handlers
+    # can ignore synthetic element clicks.
+    login_response = None
+
+    try:
+        async with page.expect_response(
+            lambda r: "/api/webapi/Login" in r.url and r.request.method == "POST",
+            timeout=15000
+        ) as response_info:
+            try:
+                await pwd.press("Enter")
+            except Exception:
+                await click_login()
+
+        login_response = await response_info.value
+        global LOGIN_API_DIAG
+        LOGIN_API_DIAG = f"observed HTTP {login_response.status}"
+        log.info("Login API response received: %s %s",
+                 login_response.status, login_response.url)
+
+        try:
+            payload = await login_response.json()
+            # Never log tokens/passwords.
+            log.info("Login API returned code=%s msg=%s",
+                     payload.get("code"), payload.get("msg"))
+        except Exception:
+            pass
+
+    except Exception as e:
+        log.info("Native submit/API wait failed: %s", e)
+
+        # Fallback: use all click strategies, then wait briefly for the
+        # same endpoint to appear in the page's network traffic.
+        await click_login()
+        await page.wait_for_timeout(7500)
+
+    await page.wait_for_timeout(2500)
 
     ok, reason = await verify()
     if not ok:
