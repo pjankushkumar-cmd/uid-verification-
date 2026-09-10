@@ -74,6 +74,41 @@ async def screenshot(path="/tmp/debug.png"):
         return path
     except: return None
 
+
+async def login_diagnostics():
+    """Collect safe UI diagnostics without exposing the password value."""
+    try:
+        info = await page.evaluate("""
+        () => {
+          const all = [...document.querySelectorAll('*')];
+          const hits = all.filter(el => {
+            const t = (el.innerText || el.value || '').trim().toLowerCase();
+            return t === 'log in' || t === 'login';
+          }).slice(0, 10);
+
+          return hits.map((el, i) => {
+            const r = el.getBoundingClientRect();
+            return {
+              i,
+              tag: el.tagName,
+              text: (el.innerText || el.value || '').trim().slice(0,80),
+              type: el.getAttribute('type'),
+              role: el.getAttribute('role'),
+              cls: typeof el.className === 'string' ? el.className.slice(0,200) : '',
+              disabled: !!el.disabled,
+              x: Math.round(r.x), y: Math.round(r.y),
+              w: Math.round(r.width), h: Math.round(r.height),
+              visible: !!(r.width && r.height)
+            };
+          });
+        }
+        """)
+        log.info("LOGIN UI DIAGNOSTICS: %s", json.dumps(info, ensure_ascii=False))
+        return info
+    except Exception as e:
+        log.warning("Login diagnostics failed: %s", e)
+        return []
+
 async def click_login():
     candidates = [
         page.get_by_role("button", name=re.compile(r"^\s*log\s*in\s*$", re.I)),
@@ -84,6 +119,8 @@ async def click_login():
         page.locator('input[type="submit"]'),
         page.locator('a:has-text("Log in")')
     ]
+    await login_diagnostics()
+
     btn = None
     for loc in candidates:
         try:
@@ -105,6 +142,7 @@ async def click_login():
     for mode in ("normal", "force"):
         try:
             await btn.click(timeout=15000, force=(mode=="force"))
+            await page.wait_for_timeout(1200)
             log.info("Login click: %s", mode)
             return
         except Exception as e:
@@ -231,6 +269,34 @@ async def handle(chat_id, text):
                 await send(chat_id, f"UID: {p[1]}\n\nRecord:\n" + "\n".join(f"{i+1}. {x}" for i,x in enumerate(rows[:5])))
             else: await send(chat_id, f"UID: {p[1]}\nStatus: Record not found on the current page.")
         except Exception as e: await send(chat_id, f"Info error:\n{type(e).__name__}: {e}")
+    elif cmd == "/diagnose":
+        if not page:
+            await send(chat_id, "Browser is not open. Use /login first.")
+            return
+        try:
+            info = await login_diagnostics()
+            path = "/tmp/login_diagnose.png"
+            await page.screenshot(path=path, full_page=False)
+            summary = []
+            for x in info:
+                summary.append(
+                    f"{x['i']}: {x['tag']} text={x['text']!r} "
+                    f"role={x['role']!r} type={x['type']!r} "
+                    f"visible={x['visible']} disabled={x['disabled']} "
+                    f"box={x['x']},{x['y']} {x['w']}x{x['h']}"
+                )
+            msg = "Login UI diagnostics:\\n\\n" + (
+                "\\n".join(summary) if summary else "No exact Log in/Login text element found."
+            )
+            await send(chat_id, msg[:3900])
+            with open(path, "rb") as f:
+                form = aiohttp.FormData()
+                form.add_field("chat_id", str(chat_id))
+                form.add_field("photo", f, filename="login_diagnose.png", content_type="image/png")
+                await tg("sendPhoto", form)
+        except Exception as e:
+            await send(chat_id, f"Diagnose error:\\n{type(e).__name__}: {e}")
+
     elif cmd == "/screenshot":
         if not page: await send(chat_id, "Browser is not open. Use /login first."); return
         path="/tmp/current_screen.png"
