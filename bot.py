@@ -175,9 +175,26 @@ async def click_login():
         await screenshot("/tmp/login_click_failed.png")
         raise RuntimeError(f"Could not activate Log in control: {e}")
 
+
+async def wait_for_login_result(timeout_ms=20000):
+    """Wait for the SPA to finish its normal login flow.
+    This does not inject tokens or bypass server authorization.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            url = page.url.lower()
+            if "#/login" not in url and await login_form() is False:
+                return True
+        except Exception:
+            pass
+        await page.wait_for_timeout(500)
+    return False
+
+
 async def verify():
     global logged_in
-    await page.wait_for_timeout(5000)
+    await wait_for_login_result(20000)
     if await login_form():
         return False, "The site is still showing the login form."
     await page.goto(RECORD_URL, wait_until="domcontentloaded", timeout=60000)
@@ -276,6 +293,14 @@ async def do_login():
         await page.wait_for_timeout(7500)
 
     await page.wait_for_timeout(2500)
+
+    # Give the SPA one final normal navigation opportunity after a successful
+    # Login API response. No cookies/tokens are manually injected.
+    if LOGIN_API_DIAG == "observed HTTP 200":
+        try:
+            await page.wait_for_timeout(1500)
+        except Exception:
+            pass
 
     ok, reason = await verify()
     if not ok:

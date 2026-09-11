@@ -46,3 +46,9 @@ The browser context is configured to more closely match the normal mobile
 Chrome environment shown in the successful browser request (locale, timezone,
 viewport, mobile/touch mode and Chrome user-agent). The bot still uses the
 website's normal login flow and does not inject or reuse live tokens/cookies.
+
+
+## Login session
+This build waits for the SPA login result and verifies the protected record
+page before declaring login successful. It does not fabricate a successful
+login or bypass a server-side permission response.
