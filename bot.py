@@ -201,12 +201,26 @@ async def do_login():
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(headless=HEADLESS, args=[
         "--no-sandbox","--disable-dev-shm-usage","--disable-gpu","--disable-setuid-sandbox"])
-    context = await browser.new_context(viewport={"width":390,"height":844},
-        device_scale_factor=2,is_mobile=True,has_touch=True,
-        user_agent="Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36")
+    context = await browser.new_context(
+        viewport={"width": 390, "height": 844},
+        screen={"width": 390, "height": 844},
+        device_scale_factor=2,
+        is_mobile=True,
+        has_touch=True,
+        locale="en-US",
+        timezone_id="Asia/Kolkata",
+        user_agent=(
+            "Mozilla/5.0 (Linux; Android 13; Mobile) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/139.0.0.0 Mobile Safari/537.36"
+        ),
+        extra_http_headers={
+            "Accept-Language": "en-US,en;q=0.9"
+        }
+    )
     page = await context.new_page()
     await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(3500)
+    await page.wait_for_timeout(5000)
 
     phone = await visible(['input[type="tel"]','input[placeholder*="phone" i]',
         'input[placeholder*="mobile" i]','input[placeholder*="number" i]',
@@ -242,9 +256,14 @@ async def do_login():
 
         try:
             payload = await login_response.json()
-            # Never log tokens/passwords.
-            log.info("Login API returned code=%s msg=%s",
-                     payload.get("code"), payload.get("msg"))
+            # Never log tokens/passwords/session fields.
+            code = payload.get("code")
+            msg = str(payload.get("msg") or payload.get("message") or "")
+            log.info("Login API returned code=%s msg=%s", code, msg)
+            if str(code) not in ("0", "200") and msg:
+                raise RuntimeError(f"YaarWin login rejected the request: {msg}")
+        except RuntimeError:
+            raise
         except Exception:
             pass
 
@@ -261,6 +280,13 @@ async def do_login():
     ok, reason = await verify()
     if not ok:
         await screenshot("/tmp/login_failed_debug.png")
+        if LOGIN_API_DIAG.startswith("server rejected login:"):
+            raise RuntimeError(
+                "YaarWin server rejected the login request: "
+                + LOGIN_API_DIAG
+                + ". This is a server-side authorization/context rejection, "
+                  "not a Telegram button-click error."
+            )
         raise RuntimeError("Login was NOT verified. " + reason)
     return reason
 
@@ -346,7 +372,9 @@ async def handle(chat_id, text):
                 await tg("sendPhoto",form)
         except Exception as e: await send(chat_id, f"Screenshot error:\n{e}")
     elif cmd == "/status":
-        await send(chat_id, f"Browser open: {bool(page)}\nLogin configured: {bool(phone_value and password_value)}\nLogin verified: {logged_in}\nCurrent page: {page.url if page else '-'}")
+        await send(chat_id, f"Browser open: {bool(page)}\nLogin configured: {bool(phone_value and password_value)}\nLogin verified: {logged_in}\nLogin API: {LOGIN_API_DIAG}\nCurrent page: {page.url if page else '-'}")
+    elif cmd == "/help":
+        await send(chat_id, "/setlogin NUMBER PASSWORD\n/login\n/info UID\n/screenshot\n/diagnose\n/status\n/stop")
     elif cmd == "/stop":
         await close_browser()
         await send(chat_id, "Browser stopped.")
